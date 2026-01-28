@@ -1,5 +1,7 @@
 # SystemPolicyControl API Documentation
 
+**For comprehensive codebase documentation, see [CODEBASE.md](CODEBASE.md)**
+
 ## Overview
 
 The SystemPolicyControl agent provides a complete CRUD (Create, Read, Update, Delete) interface for managing macOS Gatekeeper configuration profiles.
