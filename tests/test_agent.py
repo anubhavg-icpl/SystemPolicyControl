@@ -77,6 +77,30 @@ class SystemPolicyAgentCLITests(unittest.TestCase):
         self.assertFalse(state.install_attempted)
         self.assertTrue(Path(state.profile_path).exists())
 
+    def test_list_profiles_returns_empty_when_no_profiles(self) -> None:
+        result = subprocess.run([str(AGENT_BIN), "list"], capture_output=True, text=True, check=True)
+        self.assertIn("[]", result.stdout.strip())
+
+    def test_remove_policy_deletes_state_file(self) -> None:
+        self._run_cli()
+        state = self.store.load()
+        assert state is not None
+        self.assertTrue(state.policy.profile_identifier == "com.example.policy")
+
+        remove_args = [
+            str(AGENT_BIN),
+            "remove",
+            "com.example.policy",
+            "--profile-dir",
+            str(self.profile_dir),
+            "--state-path",
+            str(self.state_path),
+        ]
+        subprocess.run(remove_args, capture_output=True, text=True)
+
+        state_after = self.store.load()
+        self.assertIsNone(state_after)
+
 
 if __name__ == "__main__":
     unittest.main()

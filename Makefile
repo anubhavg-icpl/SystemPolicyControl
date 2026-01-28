@@ -4,7 +4,7 @@ PYTHONPATH?=src
 SWIFT_PACKAGE=swift/SystemPolicyAgent
 AGENT_BIN=bin/system-policy-agent
 
-.PHONY: setup build build-agent run-agent run-api test clean
+.PHONY: setup build build-agent run-agent run-api test clean verify
 
 setup:
 	python3 -m venv $(VENV)
@@ -25,6 +25,9 @@ run-api:
 
 test: build-agent
 	PYTHONPATH=$(PYTHONPATH) $(PYTHON) -m unittest discover -s tests -p 'test_*.py'
+
+verify: build-agent
+	PYTHONPATH=src python3 scripts/verify_integration.py
 
 clean:
 	rm -rf $(VENV) dist/ build/ __pycache__/ .pytest_cache/ bin/ $(SWIFT_PACKAGE)/.build

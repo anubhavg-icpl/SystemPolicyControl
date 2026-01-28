@@ -68,9 +68,14 @@ func parseBool(_ value: String) -> Bool? {
 
 func printUsage() {
     let usage = """
-    Usage: system-policy-agent apply [options]
+    Usage: system-policy-agent <action> [options]
 
-    Options:
+    Actions:
+      apply                               Generate and optionally install a Gatekeeper profile
+      remove <identifier>                 Remove a profile by identifier
+      list                                List installed profiles
+
+    Options for 'apply':
       --profile-dir <path>                Directory to write generated .mobileconfig files (default: data/profiles)
       --state-path <path>                 JSON file that tracks the last applied policy (default: data/policy_state.json)
       --profile-identifier <value>        Base identifier stored in the payload (default: com.systempolicycontrol.policy)
@@ -81,15 +86,27 @@ func printUsage() {
       --enable-assessment <bool>
       --enable-xprotect-malware-upload <bool>
       --no-install                        Generate the profile without calling the profiles command
+
+    Options for 'remove':
+      --profile-dir <path>                Directory containing the profile (default: data/profiles)
+      --state-path <path>                 JSON file tracking policy state (default: data/policy_state.json)
+
+    Global options:
       --help                              Show this message
     """
     print(usage)
 }
 
-func parseArguments() throws -> AgentConfig {
+enum AgentAction {
+    case apply(AgentConfig)
+    case remove(identifier: String, profileDirectory: URL, statePath: URL)
+    case list
+}
+
+func parseArguments() throws -> AgentAction {
     var args = CommandLine.arguments
     guard args.count >= 2 else {
-        throw AgentError.invalidArguments("Missing action. Expected 'apply'.")
+        throw AgentError.invalidArguments("Missing action. Expected 'apply', 'remove', or 'list'.")
     }
 
     _ = args.removeFirst() // executable name
@@ -99,72 +116,105 @@ func parseArguments() throws -> AgentConfig {
         exit(EXIT_SUCCESS)
     }
 
-    guard action == "apply" else {
+    switch action {
+    case "apply":
+        var config = AgentConfig()
+        var index = 0
+        while index < args.count {
+            let arg = args[index]
+            switch arg {
+            case "--help", "-h":
+                printUsage()
+                exit(EXIT_SUCCESS)
+            case "--profile-dir":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--profile-dir requires a value") }
+                config.profileDirectory = resolvePath(args[index])
+            case "--state-path":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--state-path requires a value") }
+                config.statePath = resolvePath(args[index])
+            case "--profile-identifier":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--profile-identifier requires a value") }
+                config.profileIdentifier = args[index]
+            case "--display-name":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--display-name requires a value") }
+                config.displayName = args[index]
+            case "--organization":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--organization requires a value") }
+                config.organization = args[index]
+            case "--description":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--description requires a value") }
+                config.description = args[index]
+            case "--allow-identified-developers":
+                index += 1
+                guard index < args.count, let parsed = parseBool(args[index]) else {
+                    throw AgentError.invalidArguments("--allow-identified-developers requires true/false")
+                }
+                config.allowIdentifiedDevelopers = parsed
+            case "--enable-assessment":
+                index += 1
+                guard index < args.count, let parsed = parseBool(args[index]) else {
+                    throw AgentError.invalidArguments("--enable-assessment requires true/false")
+                }
+                config.enableAssessment = parsed
+                if !parsed {
+                    config.allowIdentifiedDevelopers = false
+                }
+            case "--enable-xprotect-malware-upload":
+                index += 1
+                guard index < args.count, let parsed = parseBool(args[index]) else {
+                    throw AgentError.invalidArguments("--enable-xprotect-malware-upload requires true/false")
+                }
+                config.enableXProtectMalwareUpload = parsed
+            case "--no-install":
+                config.installProfile = false
+            default:
+                throw AgentError.invalidArguments("Unknown argument: \(arg)")
+            }
+            index += 1
+        }
+        return .apply(config)
+
+    case "remove":
+        guard args.count >= 1 else {
+            throw AgentError.invalidArguments("remove action requires a profile identifier")
+        }
+        let identifier = args.removeFirst()
+        var profileDirectory = AgentConfig.defaultProfilesDirectory()
+        var statePath = AgentConfig.defaultStatePath()
+        var index = 0
+        while index < args.count {
+            let arg = args[index]
+            switch arg {
+            case "--profile-dir":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--profile-dir requires a value") }
+                profileDirectory = resolvePath(args[index])
+            case "--state-path":
+                index += 1
+                guard index < args.count else { throw AgentError.invalidArguments("--state-path requires a value") }
+                statePath = resolvePath(args[index])
+            default:
+                throw AgentError.invalidArguments("Unknown argument for remove: \(arg)")
+            }
+            index += 1
+        }
+        return .remove(identifier: identifier, profileDirectory: profileDirectory, statePath: statePath)
+
+    case "list":
+        if !args.isEmpty {
+            throw AgentError.invalidArguments("list action does not take any arguments")
+        }
+        return .list
+
+    default:
         throw AgentError.invalidArguments("Unsupported action: \(action)")
     }
-
-    var config = AgentConfig()
-    var index = 0
-    while index < args.count {
-        let arg = args[index]
-        switch arg {
-        case "--help", "-h":
-            printUsage()
-            exit(EXIT_SUCCESS)
-        case "--profile-dir":
-            index += 1
-            guard index < args.count else { throw AgentError.invalidArguments("--profile-dir requires a value") }
-            config.profileDirectory = resolvePath(args[index])
-        case "--state-path":
-            index += 1
-            guard index < args.count else { throw AgentError.invalidArguments("--state-path requires a value") }
-            config.statePath = resolvePath(args[index])
-        case "--profile-identifier":
-            index += 1
-            guard index < args.count else { throw AgentError.invalidArguments("--profile-identifier requires a value") }
-            config.profileIdentifier = args[index]
-        case "--display-name":
-            index += 1
-            guard index < args.count else { throw AgentError.invalidArguments("--display-name requires a value") }
-            config.displayName = args[index]
-        case "--organization":
-            index += 1
-            guard index < args.count else { throw AgentError.invalidArguments("--organization requires a value") }
-            config.organization = args[index]
-        case "--description":
-            index += 1
-            guard index < args.count else { throw AgentError.invalidArguments("--description requires a value") }
-            config.description = args[index]
-        case "--allow-identified-developers":
-            index += 1
-            guard index < args.count, let parsed = parseBool(args[index]) else {
-                throw AgentError.invalidArguments("--allow-identified-developers requires true/false")
-            }
-            config.allowIdentifiedDevelopers = parsed
-        case "--enable-assessment":
-            index += 1
-            guard index < args.count, let parsed = parseBool(args[index]) else {
-                throw AgentError.invalidArguments("--enable-assessment requires true/false")
-            }
-            config.enableAssessment = parsed
-            if !parsed {
-                config.allowIdentifiedDevelopers = false
-            }
-        case "--enable-xprotect-malware-upload":
-            index += 1
-            guard index < args.count, let parsed = parseBool(args[index]) else {
-                throw AgentError.invalidArguments("--enable-xprotect-malware-upload requires true/false")
-            }
-            config.enableXProtectMalwareUpload = parsed
-        case "--no-install":
-            config.installProfile = false
-        default:
-            throw AgentError.invalidArguments("Unknown argument: \(arg)")
-        }
-        index += 1
-    }
-
-    return config
 }
 
 func buildProfilePayload(config: AgentConfig) -> [String: Any] {
@@ -238,6 +288,82 @@ func installProfile(at url: URL, shouldInstall: Bool) -> InstallResult {
     #endif
 }
 
+func removeProfile(withIdentifier identifier: String) -> InstallResult {
+    #if os(macOS)
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/profiles")
+    process.arguments = ["-R", "-p", identifier]
+
+    let stdoutPipe = Pipe()
+    process.standardOutput = stdoutPipe
+    let stderrPipe = Pipe()
+    process.standardError = stderrPipe
+
+    do {
+        try process.run()
+        process.waitUntilExit()
+    } catch {
+        return InstallResult(succeeded: false, stdout: nil, stderr: "Failed to invoke profiles: \(error)")
+    }
+
+    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+    let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+    let stdoutString = String(data: stdoutData, encoding: .utf8)
+    let stderrString = String(data: stderrData, encoding: .utf8)
+    let success = process.terminationStatus == 0
+    return InstallResult(succeeded: success, stdout: stdoutString, stderr: stderrString)
+    #else
+    return InstallResult(succeeded: false, stdout: nil, stderr: "Profile removal supported only on macOS")
+    #endif
+}
+
+func listProfiles() -> [[String: Any]]? {
+    #if os(macOS)
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/profiles")
+    process.arguments = ["-C", "-o", "stdout"]
+
+    let stdoutPipe = Pipe()
+    process.standardOutput = stdoutPipe
+    let stderrPipe = Pipe()
+    process.standardError = stderrPipe
+
+    do {
+        try process.run()
+        process.waitUntilExit()
+    } catch {
+        return []
+    }
+
+    let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+
+    if stdoutData.isEmpty {
+        return []
+    }
+
+    guard let profiles = try? PropertyListSerialization.propertyList(from: stdoutData, options: [], format: nil) as? [[String: Any]] else {
+        return []
+    }
+    return profiles
+    #else
+    return nil
+    #endif
+}
+
+func deleteState(at path: URL) throws {
+    let fileManager = FileManager.default
+    if fileManager.fileExists(atPath: path.path) {
+        try fileManager.removeItem(at: path)
+    }
+}
+
+func deleteProfileFile(at path: URL) throws {
+    let fileManager = FileManager.default
+    if fileManager.fileExists(atPath: path.path) {
+        try fileManager.removeItem(at: path)
+    }
+}
+
 func writeState(config: AgentConfig, profilePath: URL, installResult: InstallResult) throws {
     let fileManager = FileManager.default
     try fileManager.createDirectory(at: config.statePath.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: nil)
@@ -281,18 +407,65 @@ func writeState(config: AgentConfig, profilePath: URL, installResult: InstallRes
 
 func runAgent() -> Int32 {
     do {
-        let config = try parseArguments()
-        let profile = buildProfilePayload(config: config)
-        let profilePath = try writeProfile(profile, to: config.profileDirectory, identifier: config.profileIdentifier)
-        let installResult = installProfile(at: profilePath, shouldInstall: config.installProfile)
-        try writeState(config: config, profilePath: profilePath, installResult: installResult)
-        if installResult.succeeded || !config.installProfile {
-            print("Profile generated at \(profilePath.path)")
-            return EXIT_SUCCESS
-        } else {
-            fputs("Profile installation failed: \(installResult.stderr ?? "unknown error")\n", stderr)
-            return EXIT_FAILURE
+        let action = try parseArguments()
+
+        switch action {
+        case .apply(let config):
+            let profile = buildProfilePayload(config: config)
+            let profilePath = try writeProfile(profile, to: config.profileDirectory, identifier: config.profileIdentifier)
+            let installResult = installProfile(at: profilePath, shouldInstall: config.installProfile)
+            try writeState(config: config, profilePath: profilePath, installResult: installResult)
+            if installResult.succeeded || !config.installProfile {
+                print("Profile generated at \(profilePath.path)")
+                return EXIT_SUCCESS
+            } else {
+                fputs("Profile installation failed: \(installResult.stderr ?? "unknown error")\n", stderr)
+                return EXIT_FAILURE
+            }
+
+        case .remove(let identifier, let profileDirectory, let statePath):
+            let removeResult = removeProfile(withIdentifier: identifier)
+            let fileManager = FileManager.default
+
+            if let files = try? fileManager.contentsOfDirectory(at: profileDirectory, includingPropertiesForKeys: nil) {
+                for file in files where file.path.contains(identifier) {
+                    try? fileManager.removeItem(at: file)
+                }
+            }
+
+            try deleteState(at: statePath)
+
+            if removeResult.succeeded {
+                print("Profile removed successfully")
+                return EXIT_SUCCESS
+            } else {
+                let errorOutput = removeResult.stderr ?? "unknown error"
+                if errorOutput.isEmpty {
+                    print("Profile removed from disk")
+                    return EXIT_SUCCESS
+                }
+                fputs("Profile removal failed: \(errorOutput)\n", stderr)
+                return EXIT_FAILURE
+            }
+
+        case .list:
+            if let profiles = listProfiles() {
+                let jsonData: Data
+                if profiles.isEmpty {
+                    jsonData = try JSONSerialization.data(withJSONObject: profiles, options: [.sortedKeys])
+                } else {
+                    jsonData = try JSONSerialization.data(withJSONObject: profiles, options: [.prettyPrinted, .sortedKeys])
+                }
+                if let jsonString = String(data: jsonData, encoding: .utf8) {
+                    print(jsonString)
+                }
+                return EXIT_SUCCESS
+            } else {
+                print("[]")
+                return EXIT_SUCCESS
+            }
         }
+
     } catch let error as AgentError {
         fputs("Error: \(error.description)\n", stderr)
         printUsage()

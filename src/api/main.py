@@ -16,8 +16,6 @@ AGENT_BIN = Path(os.environ.get("SPC_AGENT_PATH", "bin/system-policy-agent"))
 STATE_PATH = Path(os.environ.get("SPC_STATE_PATH", "data/policy_state.json"))
 PROFILE_DIR = Path(os.environ.get("SPC_PROFILE_DIR", "data/profiles"))
 
-_store = PolicyStateStore(STATE_PATH)
-
 ResponseBody = list[bytes]
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 
@@ -39,14 +37,16 @@ def _read_body(environ) -> dict:
     return json.loads(raw.decode("utf-8"))
 
 
-def _agent_args(policy: SystemPolicy, install: bool) -> list[str]:
+def _agent_args(
+    agent_bin: Path, policy: SystemPolicy, install: bool, profile_dir: Path, state_path: Path
+) -> list[str]:
     args = [
-        str(AGENT_BIN),
+        str(agent_bin),
         "apply",
         "--profile-dir",
-        str(PROFILE_DIR),
+        str(profile_dir),
         "--state-path",
-        str(STATE_PATH),
+        str(state_path),
         "--profile-identifier",
         policy.profile_identifier,
         "--display-name",
@@ -67,22 +67,68 @@ def _agent_args(policy: SystemPolicy, install: bool) -> list[str]:
     return args
 
 
-def _ensure_agent_binary() -> bool:
-    return AGENT_BIN.exists() and AGENT_BIN.is_file()
+def _remove_args(agent_bin: Path, identifier: str, profile_dir: Path, state_path: Path) -> list[str]:
+    args = [
+        str(agent_bin),
+        "remove",
+        identifier,
+        "--profile-dir",
+        str(profile_dir),
+        "--state-path",
+        str(state_path),
+    ]
+    return args
+
+
+def _list_args(agent_bin: Path) -> list[str]:
+    args = [str(agent_bin), "list"]
+    return args
 
 
 def application(environ, start_response: StartResponse) -> ResponseBody:
     path = environ.get("PATH_INFO", "/")
     method = environ.get("REQUEST_METHOD", "GET").upper()
 
+    # Re-read environment variables for each request to support testing
+    agent_bin = Path(os.environ.get("SPC_AGENT_PATH", "bin/system-policy-agent"))
+    state_path = Path(os.environ.get("SPC_STATE_PATH", "data/policy_state.json"))
+    profile_dir = Path(os.environ.get("SPC_PROFILE_DIR", "data/profiles"))
+
+    store = PolicyStateStore(state_path)
+
     if path == "/healthz" and method == "GET":
         status, headers, body = _json_response(HTTPStatus.OK, {"status": "ok"})
         start_response(status, headers)
         return body
 
+    if path == "/policies" and method == "GET":
+        if not agent_bin.exists() or not agent_bin.is_file():
+            status, headers, body = _json_response(
+                HTTPStatus.SERVICE_UNAVAILABLE,
+                {"error": "agent_binary_missing", "path": str(agent_bin)},
+            )
+            start_response(status, headers)
+            return body
+        args = _list_args(agent_bin)
+        result = subprocess.run(args, capture_output=True, text=True)
+        if result.returncode != 0:
+            status, headers, body = _json_response(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                {"error": "agent_failed", "stderr": result.stderr},
+            )
+            start_response(status, headers)
+            return body
+        try:
+            policies = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            policies = []
+        status, headers, body = _json_response(HTTPStatus.OK, {"policies": policies})
+        start_response(status, headers)
+        return body
+
     if path == "/policy":
         if method == "GET":
-            state = _store.load()
+            state = store.load()
             if not state:
                 status, headers, body = _json_response(
                     HTTPStatus.NOT_FOUND, {"error": "policy_not_found"}
@@ -93,17 +139,17 @@ def application(environ, start_response: StartResponse) -> ResponseBody:
             start_response(status, headers)
             return body
         if method == "POST":
-            if not _ensure_agent_binary():
+            if not agent_bin.exists() or not agent_bin.is_file():
                 status, headers, body = _json_response(
                     HTTPStatus.SERVICE_UNAVAILABLE,
-                    {"error": "agent_binary_missing", "path": str(AGENT_BIN)},
+                    {"error": "agent_binary_missing", "path": str(agent_bin)},
                 )
                 start_response(status, headers)
                 return body
             payload = _read_body(environ)
             install = bool(payload.pop("install", True))
             policy = SystemPolicy.from_dict(payload)
-            args = _agent_args(policy, install)
+            args = _agent_args(agent_bin, policy, install, profile_dir, state_path)
             result = subprocess.run(args, capture_output=True, text=True)
             if result.returncode != 0:
                 status, headers, body = _json_response(
@@ -116,7 +162,7 @@ def application(environ, start_response: StartResponse) -> ResponseBody:
                 )
                 start_response(status, headers)
                 return body
-            state = _store.load()
+            state = store.load()
             if not state:
                 status, headers, body = _json_response(
                     HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -125,6 +171,76 @@ def application(environ, start_response: StartResponse) -> ResponseBody:
                 start_response(status, headers)
                 return body
             status, headers, body = _json_response(HTTPStatus.CREATED, state.to_dict())
+            start_response(status, headers)
+            return body
+
+        if method == "PUT":
+            if not agent_bin.exists() or not agent_bin.is_file():
+                status, headers, body = _json_response(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "agent_binary_missing", "path": str(agent_bin)},
+                )
+                start_response(status, headers)
+                return body
+            payload = _read_body(environ)
+            install = bool(payload.pop("install", True))
+            policy = SystemPolicy.from_dict(payload)
+            args = _agent_args(agent_bin, policy, install, profile_dir, state_path)
+            result = subprocess.run(args, capture_output=True, text=True)
+            if result.returncode != 0:
+                status, headers, body = _json_response(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {
+                        "error": "agent_failed",
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    },
+                )
+                start_response(status, headers)
+                return body
+            state = store.load()
+            if not state:
+                status, headers, body = _json_response(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {"error": "state_unavailable"},
+                )
+                start_response(status, headers)
+                return body
+            status, headers, body = _json_response(HTTPStatus.OK, state.to_dict())
+            start_response(status, headers)
+            return body
+
+        if method == "DELETE":
+            if not agent_bin.exists() or not agent_bin.is_file():
+                status, headers, body = _json_response(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "agent_binary_missing", "path": str(agent_bin)},
+                )
+                start_response(status, headers)
+                return body
+            state = store.load()
+            if not state:
+                status, headers, body = _json_response(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "policy_not_found"},
+                )
+                start_response(status, headers)
+                return body
+            identifier = state.policy.profile_identifier
+            args = _remove_args(agent_bin, identifier, profile_dir, state_path)
+            result = subprocess.run(args, capture_output=True, text=True)
+            if result.returncode != 0:
+                status, headers, body = _json_response(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    {
+                        "error": "agent_failed",
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    },
+                )
+                start_response(status, headers)
+                return body
+            status, headers, body = _json_response(HTTPStatus.OK, {"message": "Policy removed"})
             start_response(status, headers)
             return body
 
